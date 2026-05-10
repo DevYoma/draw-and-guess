@@ -29,9 +29,19 @@ export function DrawingCanvas({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Set canvas size
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
+    // Get device pixel ratio for high DPI displays
+    const dpr = window.devicePixelRatio || 1;
+    
+    // Set canvas display size (CSS)
+    const displayWidth = canvas.offsetWidth;
+    const displayHeight = canvas.offsetHeight;
+    
+    // Set canvas drawing surface size (actual pixels)
+    canvas.width = displayWidth * dpr;
+    canvas.height = displayHeight * dpr;
+    
+    // Scale the context to match device pixel ratio
+    ctx.scale(dpr, dpr);
 
     // Set drawing context
     ctx.lineCap = 'round';
@@ -83,10 +93,13 @@ export function DrawingCanvas({
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
+    lastPos.current = { x, y };
     context.beginPath();
     context.moveTo(x, y);
     setIsMouseDown(true);
   };
+
+  const lastPos = useRef({ x: 0, y: 0 });
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!isMouseDown || !isDrawer || !isDrawing || !context) return;
@@ -101,17 +114,14 @@ export function DrawingCanvas({
     context.lineTo(x, y);
     context.stroke();
 
-    // Store stroke for last position
-    const lastX = e.clientX - rect.left - 2;
-    const lastY = e.clientY - rect.top - 2;
-
     const stroke = {
-      startX: lastX,
-      startY: lastY,
+      startX: lastPos.current.x,
+      startY: lastPos.current.y,
       endX: x,
       endY: y,
     };
 
+    lastPos.current = { x, y };
     socket?.emit('draw', { stroke });
   };
 
