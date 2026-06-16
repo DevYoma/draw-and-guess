@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import { Socket } from 'socket.io-client';
 import { Button } from '@/components/ui/button';
 import { Trash2 } from 'lucide-react';
@@ -19,44 +19,62 @@ export function DrawingCanvas({
   onStrokeDrawn,
 }: DrawingCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isMouseDown, setIsMouseDown] = useState(false);
-  const [context, setContext] = useState<CanvasRenderingContext2D | null>(null);
+  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
+  const isMouseDown = useRef(false);
+  const lastPos = useRef({ x: 0, y: 0 });
 
-  useEffect(() => {
+  // ─── Canvas Init & Resize ────────────────────────────────────────────────────
+  const initCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Get device pixel ratio for high DPI displays
     const dpr = window.devicePixelRatio || 1;
-    
-    // Set canvas display size (CSS)
+
+    // CSS display size
     const displayWidth = canvas.offsetWidth;
     const displayHeight = canvas.offsetHeight;
-    
-    // Set canvas drawing surface size (actual pixels)
+
+    // Backing store size (physical pixels)
     canvas.width = displayWidth * dpr;
     canvas.height = displayHeight * dpr;
-    
-    // Scale the context to match device pixel ratio
+
+    // Reset transform before scaling to avoid compounding on resize
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.scale(dpr, dpr);
 
-    // Set drawing context
+    // Apply consistent style defaults
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.lineWidth = 3;
     ctx.strokeStyle = '#000';
 
-    setContext(ctx);
+    contextRef.current = ctx;
   }, []);
 
+  useEffect(() => {
+    initCanvas();
+
+    // Re-init if the canvas container is resized (prevents coordinate drift)
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const observer = new ResizeObserver(() => {
+      initCanvas();
+    });
+    observer.observe(canvas);
+
+    return () => observer.disconnect();
+  }, [initCanvas]);
+
+  // ─── Socket Listeners ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
 
     socket.on('draw', (data: { stroke: any }) => {
-      drawStroke(data.stroke);
+      drawRemoteStroke(data.stroke);
     });
 
     socket.on('clear-canvas', () => {
@@ -67,66 +85,106 @@ export function DrawingCanvas({
       socket.off('draw');
       socket.off('clear-canvas');
     };
-  }, [socket, context]);
+  }, [socket]);
 
-  const drawStroke = (stroke: any) => {
-    if (!context) return;
+  // ─── Drawing Helpers ─────────────────────────────────────────────────────────
 
-    context.beginPath();
-    context.moveTo(stroke.startX, stroke.startY);
-    context.lineTo(stroke.endX, stroke.endY);
-    context.stroke();
+  /**
+   * Draw a stroke received from the network.
+   * Coordinates are always in CSS pixel space (same space as local drawing).
+   * The DPR scale applied during initCanvas handles the HiDPI mapping automatically.
+   */
+  const drawRemoteStroke = (stroke: any) => {
+    const ctx = contextRef.current;
+    if (!ctx) return;
+
+    // Re-apply style — remote strokes need the same settings as local ones
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#000';
+
+    ctx.beginPath();
+    ctx.moveTo(stroke.startX, stroke.startY);
+    ctx.lineTo(stroke.endX, stroke.endY);
+    ctx.stroke();
   };
 
   const clearCanvas = () => {
-    if (!context || !canvasRef.current) return;
-    context.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    const canvas = canvasRef.current;
+    const ctx = contextRef.current;
+    if (!ctx || !canvas) return;
+
+    // Use CSS display dimensions (offsetWidth/Height), NOT canvas.width/height.
+    // canvas.width is already multiplied by DPR; the context is pre-scaled,
+    // so passing DPR-inflated values would clear outside the visible area.
+    ctx.clearRect(0, 0, canvas.offsetWidth, canvas.offsetHeight);
   };
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (!isDrawer || !isDrawing || !context) return;
-
+  // ─── Get CSS-space position from mouse/touch event ───────────────────────────
+  const getPos = (
+    e: React.MouseEvent | React.TouchEvent
+  ): { x: number; y: number } | null => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) return null;
 
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
 
-    lastPos.current = { x, y };
-    context.beginPath();
-    context.moveTo(x, y);
-    setIsMouseDown(true);
+    if ('touches' in e) {
+      const touch = e.touches[0];
+      if (!touch) return null;
+      return {
+        x: touch.clientX - rect.left,
+        y: touch.clientY - rect.top,
+      };
+    }
+
+    return {
+      x: (e as React.MouseEvent).clientX - rect.left,
+      y: (e as React.MouseEvent).clientY - rect.top,
+    };
   };
 
-  const lastPos = useRef({ x: 0, y: 0 });
+  // ─── Mouse / Touch Handlers ──────────────────────────────────────────────────
+  const handlePointerDown = (e: React.MouseEvent | React.TouchEvent) => {
+    if (!isDrawer || !isDrawing) return;
+    const ctx = contextRef.current;
+    if (!ctx) return;
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isMouseDown || !isDrawer || !isDrawing || !context) return;
+    const pos = getPos(e);
+    if (!pos) return;
 
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    lastPos.current = pos;
+    ctx.beginPath();
+    ctx.moveTo(pos.x, pos.y);
+    isMouseDown.current = true;
+  };
 
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+  const handlePointerMove = (e: React.MouseEvent | React.TouchEvent) => {
+    if (!isMouseDown.current || !isDrawer || !isDrawing) return;
+    const ctx = contextRef.current;
+    if (!ctx) return;
 
-    context.lineTo(x, y);
-    context.stroke();
+    const pos = getPos(e);
+    if (!pos) return;
+
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
 
     const stroke = {
       startX: lastPos.current.x,
       startY: lastPos.current.y,
-      endX: x,
-      endY: y,
+      endX: pos.x,
+      endY: pos.y,
     };
 
-    lastPos.current = { x, y };
+    lastPos.current = pos;
     socket?.emit('draw', { stroke });
+    onStrokeDrawn?.(stroke);
   };
 
-  const handleMouseUp = () => {
-    setIsMouseDown(false);
+  const handlePointerUp = () => {
+    isMouseDown.current = false;
   };
 
   const handleClearCanvas = () => {
@@ -138,11 +196,14 @@ export function DrawingCanvas({
     <div className="flex flex-col gap-4 h-full">
       <canvas
         ref={canvasRef}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        className={`border-2 border-gray-200 bg-white rounded-lg flex-1 cursor-crosshair ${
+        onMouseDown={handlePointerDown}
+        onMouseMove={handlePointerMove}
+        onMouseUp={handlePointerUp}
+        onMouseLeave={handlePointerUp}
+        onTouchStart={handlePointerDown}
+        onTouchMove={handlePointerMove}
+        onTouchEnd={handlePointerUp}
+        className={`border-2 border-gray-200 bg-white rounded-lg flex-1 cursor-crosshair touch-none ${
           !isDrawer || !isDrawing ? 'pointer-events-none opacity-50' : ''
         }`}
       />
